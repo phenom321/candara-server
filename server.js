@@ -220,6 +220,7 @@ app.post('/generate-report', async function(req, res) {
   try {
     while (roundCount < MAX_ROUNDS) {
       roundCount++;
+      console.log('Research round', roundCount, 'of', MAX_ROUNDS);
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method:  'POST',
@@ -231,7 +232,7 @@ app.post('/generate-report', async function(req, res) {
         },
         body: JSON.stringify({
           model:      'claude-sonnet-4-6',
-          max_tokens: 16000,
+          max_tokens: 32000,
           system:     systemWithCache,
           tools:      [{ type: 'web_search_20250305', name: 'web_search' }],
           messages:   messages
