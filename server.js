@@ -136,7 +136,7 @@ Use web search to find REAL current data. Replace all metric values with actual 
 
 // ── IN-MEMORY RATE LIMIT ──────────────────────────────────
 const rateLimitStore = {};
-const DAILY_LIMIT   = 3;
+const DAILY_LIMIT   = 2;
 
 function getTodayKey() {
   return new Date().toISOString().slice(0, 10);
