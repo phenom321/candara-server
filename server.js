@@ -159,7 +159,7 @@ You must also include a "scorecard" object at the top level of the JSON with exa
   },
   "buffettIndicator": {
     "signal": "Undervalued" | "Fairly Valued" | "Overvalued",
-    "summary": "One sentence referencing the Wilshire 5000 to US GDP ratio explicitly, the current ratio level, whether it is high or low relative to its historical average, and what this implies for overall market valuation context. Note: this is a US market indicator and may have limited direct relevance for non-US listed stocks."
+    "summary": "Search for the current Wilshire 5000 to US GDP ratio. State the ACTUAL current percentage figure, compare explicitly to the long-run historical average (~100%) and the dot-com peak (~190%), state clearly if the market is elevated/fair/depressed vs history. If this stock is non-US listed, note that this is a US market macro indicator."
   }
 }`;
 
@@ -434,7 +434,7 @@ Return ONLY a valid JSON object with no markdown fencing, no preamble:
     },
     "buffettIndicator": {
       "signal": "Undervalued" | "Fairly Valued" | "Overvalued",
-      "summary": "One sentence referencing the Wilshire 5000 to US GDP ratio, the current level, whether high or low relative to history. Note: this is a US market indicator and may have limited direct relevance for non-US listed stocks."
+      "summary": "Search for the current Wilshire 5000 to US GDP ratio. State the ACTUAL current percentage figure, compare explicitly to the long-run historical average (~100%) and the dot-com peak (~190%), state clearly if the market is elevated/fair/depressed vs history. If this stock is non-US listed, note that this is a US market macro indicator."
     }
   }
 }`;
