@@ -627,6 +627,15 @@ If you cannot find any matching company, set found to false and explain briefly 
       parsed = m ? JSON.parse(m[0]) : { found: false, confirmation: 'Could not identify company. Please try again.' };
     }
 
+    // Strip any citation markup from confirmation text
+    if (parsed.confirmation) {
+      parsed.confirmation = parsed.confirmation
+        .replace(/<cite[^>]*>/gi, '')
+        .replace(/<\/cite>/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
     return res.json(parsed);
 
   } catch(err) {
