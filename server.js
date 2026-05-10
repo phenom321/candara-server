@@ -157,9 +157,9 @@ You must also include a "scorecard" object at the top level of the JSON with exa
     "category": "Slow Grower" | "Fast Grower" | "Stalwart" | "Cyclical" | "Turnaround" | "Asset Play",
     "summary": "One sentence explaining why this category fits"
   },
-  "wilshireIndex": {
+  "buffettIndicator": {
     "signal": "Undervalued" | "Fairly Valued" | "Overvalued",
-    "summary": "One sentence on where the stock sits relative to its intrinsic value using market cap to earnings/asset base reasoning"
+    "summary": "One sentence referencing the Wilshire 5000 to US GDP ratio explicitly, the current ratio level, whether it is high or low relative to its historical average, and what this implies for overall market valuation context. Note: this is a US market indicator and may have limited direct relevance for non-US listed stocks."
   }
 }`;
 
