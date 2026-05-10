@@ -378,6 +378,131 @@ When done, output a detailed structured summary of ALL data found with actual nu
   }
 });
 
+// ── QUICK SUMMARY ENDPOINT ───────────────────────────────
+// Phase 1: Haiku does 1-2 searches, returns scorecard + exec summary only
+// Fast (~30 seconds), gives user something to read immediately
+app.post('/quick-summary', async function(req, res) {
+
+  const { company } = req.body;
+  if (!company || !company.name) {
+    return res.status(400).json({ error: 'Missing company data' });
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'API key not configured' });
+  }
+
+  const QUICK_SYSTEM = `You are a financial research analyst. Do a quick preliminary analysis of the requested company using 1-2 targeted web searches. Focus on gathering enough data to produce a high-level snapshot.
+
+Return ONLY a valid JSON object with no markdown fencing, no preamble:
+{
+  "companyName": "Full official company name",
+  "ticker": "TICKER or N/A",
+  "sector": "Sector",
+  "exchange": "Exchange",
+  "executiveSummary": {
+    "business": "One key finding on core revenue model, market position, and cyclicality",
+    "competitivePosition": "One key finding on moat strength or fragility",
+    "financialHealth": "One key finding on earnings quality, margins, and returns",
+    "balanceSheet": "One key finding on leverage position and appropriateness",
+    "earningsQuality": "One key finding on reliability of reported earnings",
+    "management": "One key finding on capital allocation track record and integrity",
+    "valuation": "One key finding on where the stock sits relative to intrinsic value estimates",
+    "risks": "The single most material risk to the analysis"
+  },
+  "scorecard": {
+    "valuation": {
+      "rating": "Cheap" | "Fair" | "Expensive",
+      "summary": "One sentence explanation"
+    },
+    "growth": {
+      "rating": "Low" | "Moderate" | "High",
+      "summary": "One sentence on growth trajectory"
+    },
+    "profitability": {
+      "rating": "Weak" | "Moderate" | "Strong",
+      "summary": "One sentence on margins and returns"
+    },
+    "entrySignal": {
+      "rating": "Oversold" | "Neutral" | "Overbought",
+      "summary": "One sentence based on RSI and recent price action"
+    },
+    "peterLynch": {
+      "category": "Slow Grower" | "Fast Grower" | "Stalwart" | "Cyclical" | "Turnaround" | "Asset Play",
+      "summary": "One sentence explaining why this category fits"
+    },
+    "buffettIndicator": {
+      "signal": "Undervalued" | "Fairly Valued" | "Overvalued",
+      "summary": "One sentence referencing the Wilshire 5000 to US GDP ratio, the current level, whether high or low relative to history. Note: this is a US market indicator and may have limited direct relevance for non-US listed stocks."
+    }
+  }
+}`;
+
+  const systemWithCache = [
+    { type: 'text', text: QUICK_SYSTEM, cache_control: { type: 'ephemeral' } }
+  ];
+
+  let messages = [{
+    role: 'user',
+    content: `Quick preliminary analysis for: ${company.name} (Ticker: ${company.ticker}, Exchange: ${company.exchange}). Do 1-2 targeted searches to gather key financial data, then return the JSON snapshot.`
+  }];
+
+  let finalText = '';
+  let rounds = 0;
+
+  try {
+    while (rounds < 3) {
+      rounds++;
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'prompt-caching-2024-07-31'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 4000,
+          system: systemWithCache,
+          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+          messages
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || `API error ${response.status}`);
+
+      const content  = data.content || [];
+      const toolBlocks = content.filter(b => b.type === 'tool_use');
+      const textBlocks = content.filter(b => b.type === 'text');
+
+      if (!toolBlocks.length || data.stop_reason === 'end_turn') {
+        finalText = textBlocks.map(b => b.text).join('');
+        break;
+      }
+
+      messages.push({ role: 'assistant', content });
+      messages.push({
+        role: 'user',
+        content: toolBlocks.map(b => ({
+          type: 'tool_result',
+          tool_use_id: b.id,
+          content: `Search completed for: "${b.input?.query || ''}"`
+        }))
+      });
+    }
+
+    return res.json({ text: finalText });
+
+  } catch(err) {
+    console.error('Quick summary error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ── START SERVER ──────────────────────────────────────────
 app.listen(PORT, function() {
   console.log('Candara server running on port ' + PORT);
