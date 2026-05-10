@@ -132,7 +132,36 @@ Return exactly this shape:
   ]
 }
 
-Use web search to find REAL current data. Replace all metric values with actual figures. Be analytical, specific, and direct. Always return complete, valid JSON — never truncate mid-response.`;
+Use web search to find REAL current data. Replace all metric values with actual figures. Be analytical, specific, and direct. Always return complete, valid JSON — never truncate mid-response.
+
+You must also include a "scorecard" object at the top level of the JSON with exactly these fields:
+
+"scorecard": {
+  "valuation": {
+    "rating": "Cheap" | "Fair" | "Expensive",
+    "summary": "One sentence plain-English explanation based on DCF, P/E, P/S vs peers and history"
+  },
+  "growth": {
+    "rating": "Low" | "Moderate" | "High",
+    "summary": "One sentence on revenue and earnings growth trajectory"
+  },
+  "profitability": {
+    "rating": "Weak" | "Moderate" | "Strong",
+    "summary": "One sentence on margins, ROE, ROIC and FCF quality"
+  },
+  "entrySignal": {
+    "rating": "Oversold" | "Neutral" | "Overbought",
+    "summary": "One sentence based on RSI, Bollinger Bands, and recent price action"
+  },
+  "peterLynch": {
+    "category": "Slow Grower" | "Fast Grower" | "Stalwart" | "Cyclical" | "Turnaround" | "Asset Play",
+    "summary": "One sentence explaining why this category fits"
+  },
+  "wilshireIndex": {
+    "signal": "Undervalued" | "Fairly Valued" | "Overvalued",
+    "summary": "One sentence on where the stock sits relative to its intrinsic value using market cap to earnings/asset base reasoning"
+  }
+}`;
 
 // ── IN-MEMORY RATE LIMIT ──────────────────────────────────
 const rateLimitStore = {};
