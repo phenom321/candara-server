@@ -503,6 +503,238 @@ Return ONLY a valid JSON object with no markdown fencing, no preamble:
   }
 });
 
+
+// ── PRIVATE COMPANY: VERIFY ENDPOINT ─────────────────────
+// Step 1: Haiku does a quick search and returns 2-3 line confirmation
+// of what company it found so user can verify before full research runs
+app.post('/verify-company', async function(req, res) {
+
+  const { companyName, websiteUrl } = req.body;
+  if (!companyName) return res.status(400).json({ error: 'Missing company name' });
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'API key not configured' });
+
+  const VERIFY_SYSTEM = `You are a company research assistant. Given a company name and optional website URL, do a quick web search to identify the company and return a brief 2-3 line confirmation of what you found.
+
+Return ONLY a valid JSON object:
+{
+  "found": true | false,
+  "companyName": "Full official company name as found",
+  "confirmation": "2-3 sentences describing what the company does, where it is based, its approximate stage/size, and any other key identifying details that would help a user confirm this is the right company.",
+  "website": "Website URL if found or confirmed"
+}
+
+If you cannot find any matching company, set found to false and explain briefly in confirmation.`;
+
+  let messages = [{
+    role: 'user',
+    content: `Find and briefly describe this company: "${companyName}"${websiteUrl ? ` — Website: ${websiteUrl}` : ''}. Do a quick search and confirm what you found in 2-3 sentences.`
+  }];
+
+  let finalText = '';
+  let rounds = 0;
+
+  try {
+    while (rounds < 2) {
+      rounds++;
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 800,
+          system: VERIFY_SYSTEM,
+          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+          messages
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || `API error ${response.status}`);
+
+      const content    = data.content || [];
+      const toolBlocks = content.filter(b => b.type === 'tool_use');
+      const textBlocks = content.filter(b => b.type === 'text');
+
+      if (!toolBlocks.length || data.stop_reason === 'end_turn') {
+        finalText = textBlocks.map(b => b.text).join('');
+        break;
+      }
+
+      messages.push({ role: 'assistant', content });
+      messages.push({
+        role: 'user',
+        content: toolBlocks.map(b => ({
+          type: 'tool_result',
+          tool_use_id: b.id,
+          content: `Search completed for: "${b.input?.query || ''}"`
+        }))
+      });
+    }
+
+    const clean = finalText.replace(/```json\s*/gi,'').replace(/```\s*/gi,'').trim();
+    let parsed;
+    try { parsed = JSON.parse(clean); }
+    catch(e) {
+      const m = clean.match(/\{[\s\S]*\}/);
+      parsed = m ? JSON.parse(m[0]) : { found: false, confirmation: 'Could not identify company. Please try again.' };
+    }
+
+    return res.json(parsed);
+
+  } catch(err) {
+    console.error('Verify error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PRIVATE COMPANY: FULL RESEARCH ENDPOINT ───────────────
+// Step 2: Full deep research after user confirms the company
+app.post('/angel-research', async function(req, res) {
+
+  // Rate limit
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1').split(',')[0].trim();
+  const rl = checkRateLimit(ip);
+  if (!rl.allowed) {
+    return res.status(429).json({
+      error: 'rate_limit',
+      message: 'You have used all 2 free reports for today. Reports reset at midnight UTC.',
+      used: rl.used, limit: rl.limit
+    });
+  }
+
+  const { companyName, websiteUrl } = req.body;
+  if (!companyName) return res.status(400).json({ error: 'Missing company data' });
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'API key not configured' });
+
+  const ANGEL_SYSTEM_WITH_CACHE = [
+    { type: 'text', text: ` + '`' + ANGEL_SYSTEM + '`' + `, cache_control: { type: 'ephemeral' } }
+  ];
+
+  // Phase 1: Haiku gathers research data
+  const HAIKU_GATHER = `You are a startup research assistant. Your job is to thoroughly search the web and gather comprehensive data about the requested private company. Search multiple times using different queries to collect:
+- What the company does, its products/services, target customers
+- Founding story, founders backgrounds, team size
+- Revenue, growth metrics, funding raised, investors, valuation
+- Business model, unit economics if available
+- Key customers, partnerships, traction metrics
+- Competitive landscape and positioning
+- Any news, controversies, red flags, or notable milestones
+- Employee/customer reviews and sentiment
+- Technology stack and defensibility
+- Exit potential and comparable companies
+
+Search aggressively. When done output ALL findings as detailed structured prose — not JSON.`;
+
+  let haikusMessages = [{
+    role: 'user',
+    content: `Research this private company thoroughly: "${companyName}"${websiteUrl ? ` (Website: ${websiteUrl})` : ''}. Search multiple times to gather all available data.`
+  }];
+
+  let researchSummary = '';
+  let roundCount = 0;
+
+  try {
+    while (roundCount < 4) {
+      roundCount++;
+      console.log('Angel research round', roundCount);
+
+      const hRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'prompt-caching-2024-07-31'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 8000,
+          system: [{ type: 'text', text: HAIKU_GATHER, cache_control: { type: 'ephemeral' } }],
+          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+          messages: haikusMessages
+        })
+      });
+
+      const hData = await hRes.json();
+      if (!hRes.ok) throw new Error(hData.error?.message || `Haiku error ${hRes.status}`);
+
+      const hContent    = hData.content || [];
+      const hToolBlocks = hContent.filter(b => b.type === 'tool_use');
+      const hTextBlocks = hContent.filter(b => b.type === 'text');
+
+      if (!hToolBlocks.length || hData.stop_reason === 'end_turn') {
+        researchSummary = hTextBlocks.map(b => b.text).join('');
+        console.log('Haiku done. Summary length:', researchSummary.length);
+        break;
+      }
+
+      haikusMessages.push({ role: 'assistant', content: hContent });
+      haikusMessages.push({
+        role: 'user',
+        content: trimSearchResults(hToolBlocks.map(b => ({
+          type: 'tool_result',
+          tool_use_id: b.id,
+          content: `Search completed for: "${b.input?.query || ''}"`
+        })))
+      });
+
+      if (roundCount === 3) {
+        haikusMessages.push({
+          role: 'user',
+          content: 'You have gathered enough data. Now write a comprehensive summary of ALL research findings with every metric, fact, and insight you found.'
+        });
+      }
+    }
+
+    if (!researchSummary) throw new Error('Research returned no data. Please try again.');
+
+    // Phase 2: Sonnet writes the full report
+    console.log('Sonnet compiling angel report...');
+
+    const sRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'prompt-caching-2024-07-31'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 16000,
+        system: ANGEL_SYSTEM_WITH_CACHE,
+        messages: [{
+          role: 'user',
+          content: `Using the following research data gathered about "${companyName}"${websiteUrl ? ` (${websiteUrl})` : ''}, compile a comprehensive analyst-grade research report and return it as the JSON object specified. Use ALL data provided.\n\nRESEARCH DATA:\n${researchSummary}`
+        }]
+      })
+    });
+
+    const sData = await sRes.json();
+    if (!sRes.ok) throw new Error(sData.error?.message || `Sonnet error ${sRes.status}`);
+
+    const finalText = (sData.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    console.log('Angel report done. Length:', finalText.length);
+
+    return res.json({
+      text: finalText,
+      rateLimit: { used: rl.used, limit: rl.limit, remaining: rl.limit - rl.used }
+    });
+
+  } catch(err) {
+    console.error('Angel research error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ── START SERVER ──────────────────────────────────────────
 app.listen(PORT, function() {
   console.log('Candara server running on port ' + PORT);
