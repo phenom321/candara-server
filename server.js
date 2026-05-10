@@ -181,6 +181,47 @@ function checkRateLimit(ip) {
   return { allowed: true, used: rateLimitStore[key], limit: DAILY_LIMIT };
 }
 
+// ── SERVER-SIDE JSON REPAIR ──────────────────────────────
+// Attempts to repair truncated JSON before sending to client
+function repairJSON(str) {
+  if (!str) return str;
+  var clean = str.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+
+  // Try direct parse first
+  try { JSON.parse(clean); return clean; } catch(e) {}
+
+  // Find outermost { }
+  var start = clean.indexOf('{');
+  var end   = clean.lastIndexOf('}');
+
+  if (start === -1) return clean;
+
+  var extracted = end > start ? clean.slice(start, end + 1) : clean.slice(start);
+
+  // Try extracted
+  try { JSON.parse(extracted); return extracted; } catch(e) {}
+
+  // Count and close unclosed brackets
+  var opens = 0, aopens = 0, inStr = false, escape = false;
+  for (var i = 0; i < extracted.length; i++) {
+    var c = extracted[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\') { escape = true; continue; }
+    if (c === '"' && !escape) { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') opens++;
+    if (c === '}') opens--;
+    if (c === '[') aopens++;
+    if (c === ']') aopens--;
+  }
+
+  var suffix = inStr ? '"' : '';
+  for (var a = 0; a < aopens; a++) suffix += ']';
+  for (var o = 0; o < opens; o++) suffix += '}';
+
+  return extracted + suffix;
+}
+
 // ── TRIM SEARCH RESULTS ───────────────────────────────────
 function trimSearchResults(toolResults) {
   return toolResults.map(function(block) {
@@ -360,14 +401,15 @@ When done, output a detailed structured summary of ALL data found with actual nu
 
     const sonnetContent = sonnetData.content || [];
     const finalText     = sonnetContent.filter(b => b.type === 'text').map(b => b.text).join('');
-    console.log('Sonnet done. Report length:', finalText.length);
+    const repairedText  = repairJSON(finalText);
+    console.log('Sonnet done. Raw length:', finalText.length, 'Repaired:', repairedText.length);
 
-    if (!finalText) {
+    if (!repairedText) {
       throw new Error('Report compilation returned empty. Please try again.');
     }
 
     return res.json({
-      text:      finalText,
+      text:      repairedText,
       rateLimit: { used: rl.used, limit: rl.limit, remaining: rl.limit - rl.used },
       rounds:    roundCount
     });
@@ -614,8 +656,9 @@ app.post('/angel-research', async function(req, res) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'API key not configured' });
 
+  const ANGEL_SYSTEM_TEXT = 'You are an expert startup and private company analyst. Your role is to provide objective, in-depth research and analysis of private and early-stage companies ONLY. Do NOT provide investment recommendations, verdicts to invest or pass, target returns, portfolio advice, or any opinion on whether someone should commit capital.\n\nResearch the company using credible, independent sources (company website, news articles, Crunchbase, LinkedIn, customer reviews, employee reviews, competitor sites, industry reports, etc.). Analyze the company across all dimensions and present findings objectively.\n\nReturn a single valid JSON object only — no markdown fencing, no preamble.\n\nReturn exactly this shape:\n{\n  "companyName": "Full official company name",\n  "website": "Website URL",\n  "stage": "Stage (e.g. Seed, Series A, Series B, Growth, Unknown)",\n  "hq": "Headquarters location",\n  "industry": "Industry / sector",\n  "executiveSummary": {\n    "snapshot": "One paragraph summarising what the company does, its stage, and market position",\n    "strengths": ["Strength 1 (1-3 sentences)", "Strength 2", "Strength 3"],\n    "concerns": ["Concern 1 (1-3 sentences)", "Concern 2", "Concern 3"],\n    "valuationContext": "Brief objective assessment of how the company is priced relative to peers and what current funding terms imply",\n    "confidence": "One paragraph on how confident you are in the analysis given data quality and completeness"\n  },\n  "scorecard": {\n    "businessModel": { "rating": "Weak|Moderate|Strong", "summary": "One sentence on revenue model quality and problem-solution fit" },\n    "marketOpportunity": { "rating": "Limited|Moderate|Large", "summary": "One sentence on market size and growth potential" },\n    "teamStrength": { "rating": "Weak|Moderate|Strong", "summary": "One sentence on founder-market fit and execution capability" },\n    "traction": { "rating": "Early|Developing|Strong", "summary": "One sentence on revenue, growth, and customer quality" },\n    "defensibility": { "rating": "Low|Moderate|High", "summary": "One sentence on moats, differentiation, and competitive position" },\n    "capitalEfficiency": { "rating": "Inefficient|Moderate|Efficient", "summary": "One sentence on burn rate, runway, and capital deployment quality" }\n  },\n  "sections": [\n    { "num": "01", "title": "Business Model & Problem", "subsections": [\n      { "heading": "Product & Service Overview", "content": "..." },\n      { "heading": "Target Customer & Problem", "content": "..." },\n      { "heading": "Revenue Model", "content": "..." },\n      { "heading": "Value Proposition & Differentiation", "content": "..." },\n      { "heading": "Growth & Revenue Trajectory", "content": "..." },\n      { "heading": "Unit Economics", "content": "..." }\n    ]},\n    { "num": "02", "title": "Market, Category & Competition", "subsections": [\n      { "heading": "Market Size & Structure", "content": "..." },\n      { "heading": "Competitive Landscape", "content": "..." },\n      { "heading": "Differentiation & Positioning", "content": "..." },\n      { "heading": "Regulation & Macro", "content": "..." }\n    ]},\n    { "num": "03", "title": "Product, Technology & Defensibility", "subsections": [\n      { "heading": "Technology Quality", "content": "..." },\n      { "heading": "AI Disruption & Platform Risk", "content": "..." },\n      { "heading": "Moats & Defensibility", "content": "..." },\n      { "heading": "Data Advantage", "content": "..." }\n    ]},\n    { "num": "04", "title": "Go-To-Market, Distribution & Traction", "subsections": [\n      { "heading": "GTM & Distribution Strategy", "content": "..." },\n      { "heading": "Traction & Growth Quality", "content": "..." },\n      { "heading": "Customer Behaviour & Cohorts", "content": "..." },\n      { "heading": "Customer Concentration & Switching Costs", "content": "..." }\n    ]},\n    { "num": "05", "title": "Durability, Pricing Power & Long-Term Position", "subsections": [\n      { "heading": "10-Year Defensibility", "content": "..." },\n      { "heading": "Pricing Power vs Commoditisation", "content": "..." },\n      { "heading": "Unique Opportunity & Timing", "content": "..." }\n    ]},\n    { "num": "06", "title": "Financial Health, Burn & Capital Efficiency", "subsections": [\n      { "heading": "Revenue Scale & Growth Rate", "content": "..." },\n      { "heading": "Burn Rate & Runway", "content": "..." },\n      { "heading": "Capital Efficiency vs Peers", "content": "..." }\n    ]},\n    { "num": "07", "title": "Pricing, Valuation & Funding Dynamics", "subsections": [\n      { "heading": "Relative Valuation", "content": "..." },\n      { "heading": "Current Round Terms", "content": "..." },\n      { "heading": "Future Funding Prospects", "content": "..." },\n      { "heading": "Timing", "content": "..." }\n    ]},\n    { "num": "08", "title": "Team, Leadership & Talent", "subsections": [\n      { "heading": "Founders Background & Founder-Market Fit", "content": "..." },\n      { "heading": "Execution Capability", "content": "..." },\n      { "heading": "Key Person Risk", "content": "..." },\n      { "heading": "Talent Attraction & Scaling", "content": "..." }\n    ]},\n    { "num": "09", "title": "Governance, Culture & Operating Model", "subsections": [\n      { "heading": "Governance", "content": "..." },\n      { "heading": "Culture", "content": "..." },\n      { "heading": "Operating Discipline", "content": "..." }\n    ]},\n    { "num": "10", "title": "Risk Mapping & Scenario Analysis", "subsections": [\n      { "heading": "Principal Risks", "content": "..." },\n      { "heading": "Bear Case", "content": "..." },\n      { "heading": "Base Case", "content": "..." },\n      { "heading": "Bull Case", "content": "..." }\n    ]},\n    { "num": "11", "title": "Exit Pathways & Liquidity", "subsections": [\n      { "heading": "Realistic Exit Options", "content": "..." },\n      { "heading": "Build vs Buy Analysis", "content": "..." },\n      { "heading": "Timeline to Liquidity", "content": "..." }\n    ]},\n    { "num": "12", "title": "Evidence Quality & Red Flags", "subsections": [\n      { "heading": "Evidence Strength", "content": "..." },\n      { "heading": "Red Flags", "content": "..." }\n    ]}\n  ]\n}\n\nUse web search to find REAL current data from credible sources. Be analytical, specific, and direct. Always return complete, valid JSON — never truncate mid-response.';
   const ANGEL_SYSTEM_WITH_CACHE = [
-    { type: 'text', text: ` + '`' + ANGEL_SYSTEM + '`' + `, cache_control: { type: 'ephemeral' } }
+    { type: 'text', text: ANGEL_SYSTEM_TEXT, cache_control: { type: 'ephemeral' } }
   ];
 
   // Phase 1: Haiku gathers research data
@@ -724,8 +767,9 @@ Search aggressively. When done output ALL findings as detailed structured prose 
     const finalText = (sData.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
     console.log('Angel report done. Length:', finalText.length);
 
+    const repairedAngelText = repairJSON(finalText);
     return res.json({
-      text: finalText,
+      text: repairedAngelText,
       rateLimit: { used: rl.used, limit: rl.limit, remaining: rl.limit - rl.used }
     });
 
