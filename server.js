@@ -137,48 +137,83 @@ Use web search to find REAL current data. Replace all metric values with actual 
 You must also include a "scorecard" object at the top level of the JSON with exactly these fields:
 
 "scorecard": {
+  "businessModel": {
+    "rating": "Weak" | "Moderate" | "Strong",
+    "summary": "One sentence on revenue model quality, recurring revenue, unit economics, and margin profile"
+  },
+  "marketOpportunity": {
+    "rating": "Limited" | "Moderate" | "Large",
+    "summary": "One sentence on TAM size, market growth rate, and whether this is a winner-take-most market"
+  },
+  "teamStrength": {
+    "rating": "Weak" | "Moderate" | "Strong",
+    "summary": "One sentence on management track record, capital allocation discipline, and execution quality"
+  },
+  "competition": {
+    "rating": "Weak" | "Moderate" | "Strong",
+    "summary": "One sentence on competitive positioning vs peers — moat strength, market share, pricing power, and differentiation. Strong = clear moat and dominant position. Weak = commoditised or easily disrupted."
+  },
   "valuation": {
     "rating": "Cheap" | "Fair" | "Expensive",
-    "summary": "One sentence plain-English explanation based on DCF, P/E, P/S vs peers and history"
+    "summary": "One sentence on P/E, P/S, EV/EBITDA and DCF vs peers and historical range — is the stock attractively priced, fairly valued, or stretched?"
   },
-  "growth": {
-    "rating": "Low" | "Moderate" | "High",
-    "summary": "One sentence on revenue and earnings growth trajectory"
-  },
-  "profitability": {
+  "fundingAndFinancials": {
     "rating": "Weak" | "Moderate" | "Strong",
-    "summary": "One sentence on margins, ROE, ROIC and FCF quality"
-  },
-  "entrySignal": {
-    "rating": "Oversold" | "Neutral" | "Overbought",
-    "summary": "One sentence based on RSI, Bollinger Bands, and recent price action"
-  },
-  "peterLynch": {
-    "category": "Slow Grower" | "Fast Grower" | "Stalwart" | "Cyclical" | "Turnaround" | "Asset Play",
-    "summary": "One sentence explaining why this category fits"
-  },
-  "buffettIndicator": {
-    "signal": "Undervalued" | "Fairly Valued" | "Overvalued",
-    "summary": "Search for the current Wilshire 5000 to US GDP ratio. State the ACTUAL current percentage figure, compare explicitly to the long-run historical average (~100%) and the dot-com peak (~190%), state clearly if the market is elevated/fair/depressed vs history. If this stock is non-US listed, note that this is a US market macro indicator."
+    "summary": "One sentence on balance sheet health, FCF generation quality, debt levels, interest coverage, and financial resilience"
   }
 }`;
 
-// ── IN-MEMORY RATE LIMIT ──────────────────────────────────
+// ── IN-MEMORY RATE LIMIT (POINTS SYSTEM) ─────────────────
+// Quick search = 1 point, Deep research = 2 points
+// Limit: 2 points/day, 8 points/week
 const rateLimitStore = {};
-const DAILY_LIMIT   = 2;
+const DAILY_LIMIT  = 2;
+const WEEKLY_LIMIT = 8;
 
 function getTodayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function checkRateLimit(ip) {
-  const key = ip + ':' + getTodayKey();
-  if (!rateLimitStore[key]) rateLimitStore[key] = 0;
-  if (rateLimitStore[key] >= DAILY_LIMIT) {
-    return { allowed: false, used: rateLimitStore[key], limit: DAILY_LIMIT };
+function getWeekKey() {
+  var now  = new Date();
+  var day  = now.getUTCDay();
+  var diff = (day === 0 ? -6 : 1 - day);
+  var mon  = new Date(now);
+  mon.setUTCDate(now.getUTCDate() + diff);
+  return 'w:' + mon.toISOString().slice(0, 10);
+}
+
+function checkRateLimit(ip, points) {
+  points = points || 1;
+  var dayKey  = ip + ':' + getTodayKey();
+  var weekKey = ip + ':' + getWeekKey();
+
+  if (!rateLimitStore[dayKey])  rateLimitStore[dayKey]  = 0;
+  if (!rateLimitStore[weekKey]) rateLimitStore[weekKey] = 0;
+
+  var dayUsed  = rateLimitStore[dayKey];
+  var weekUsed = rateLimitStore[weekKey];
+
+  if (dayUsed + points > DAILY_LIMIT) {
+    return { allowed: false, reason: 'daily',
+      message: 'You have used all ' + DAILY_LIMIT + ' daily points. Resets at midnight UTC.',
+      dayUsed, weekUsed, dayLimit: DAILY_LIMIT, weekLimit: WEEKLY_LIMIT };
   }
-  rateLimitStore[key]++;
-  return { allowed: true, used: rateLimitStore[key], limit: DAILY_LIMIT };
+  if (weekUsed + points > WEEKLY_LIMIT) {
+    return { allowed: false, reason: 'weekly',
+      message: 'You have used all ' + WEEKLY_LIMIT + ' weekly points. Resets next Monday.',
+      dayUsed, weekUsed, dayLimit: DAILY_LIMIT, weekLimit: WEEKLY_LIMIT };
+  }
+
+  rateLimitStore[dayKey]  += points;
+  rateLimitStore[weekKey] += points;
+
+  return { allowed: true,
+    dayUsed:  rateLimitStore[dayKey],
+    weekUsed: rateLimitStore[weekKey],
+    dayLimit: DAILY_LIMIT,
+    weekLimit: WEEKLY_LIMIT
+  };
 }
 
 // ── SERVER-SIDE JSON REPAIR ──────────────────────────────
@@ -245,7 +280,7 @@ app.post('/generate-report', async function(req, res) {
   // Rate limit
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1')
     .split(',')[0].trim();
-  const rl = checkRateLimit(ip);
+  const rl = checkRateLimit(ip, 2);
 
   if (!rl.allowed) {
     return res.status(429).json({
@@ -454,29 +489,29 @@ Return ONLY a valid JSON object with no markdown fencing, no preamble:
     "risks": "The single most material risk to the analysis"
   },
   "scorecard": {
+    "businessModel": {
+      "rating": "Weak" | "Moderate" | "Strong",
+      "summary": "One sentence on revenue model quality and unit economics"
+    },
+    "marketOpportunity": {
+      "rating": "Limited" | "Moderate" | "Large",
+      "summary": "One sentence on market size and growth potential"
+    },
+    "teamStrength": {
+      "rating": "Weak" | "Moderate" | "Strong",
+      "summary": "One sentence on management track record and execution quality"
+    },
+    "competition": {
+      "rating": "Weak" | "Moderate" | "Strong",
+      "summary": "One sentence on competitive positioning, moat, and market share vs peers"
+    },
     "valuation": {
       "rating": "Cheap" | "Fair" | "Expensive",
-      "summary": "One sentence explanation"
+      "summary": "One sentence on P/E, P/S vs peers and historical range"
     },
-    "growth": {
-      "rating": "Low" | "Moderate" | "High",
-      "summary": "One sentence on growth trajectory"
-    },
-    "profitability": {
+    "fundingAndFinancials": {
       "rating": "Weak" | "Moderate" | "Strong",
-      "summary": "One sentence on margins and returns"
-    },
-    "entrySignal": {
-      "rating": "Oversold" | "Neutral" | "Overbought",
-      "summary": "One sentence based on RSI and recent price action"
-    },
-    "peterLynch": {
-      "category": "Slow Grower" | "Fast Grower" | "Stalwart" | "Cyclical" | "Turnaround" | "Asset Play",
-      "summary": "One sentence explaining why this category fits"
-    },
-    "buffettIndicator": {
-      "signal": "Undervalued" | "Fairly Valued" | "Overvalued",
-      "summary": "Search for the current Wilshire 5000 to US GDP ratio. State the ACTUAL current percentage figure, compare explicitly to the long-run historical average (~100%) and the dot-com peak (~190%), state clearly if the market is elevated/fair/depressed vs history. If this stock is non-US listed, note that this is a US market macro indicator."
+      "summary": "One sentence on balance sheet health, FCF, and financial resilience"
     }
   }
 }`;
@@ -648,14 +683,15 @@ If you cannot find any matching company, set found to false and explain briefly 
 // Step 2: Full deep research after user confirms the company
 app.post('/angel-research', async function(req, res) {
 
-  // Rate limit
+  // Rate limit — deep research costs 2 points
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1').split(',')[0].trim();
-  const rl = checkRateLimit(ip);
+  const rl = checkRateLimit(ip, 2);
   if (!rl.allowed) {
     return res.status(429).json({
       error: 'rate_limit',
-      message: 'You have used all 2 free reports for today. Reports reset at midnight UTC.',
-      used: rl.used, limit: rl.limit
+      message: rl.message || 'Daily limit reached.',
+      dayUsed: rl.dayUsed, weekUsed: rl.weekUsed,
+      dayLimit: rl.dayLimit, weekLimit: rl.weekLimit
     });
   }
 
@@ -784,6 +820,125 @@ Search aggressively. When done output ALL findings as detailed structured prose 
 
   } catch(err) {
     console.error('Angel research error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ── QUICK SNAPSHOT ENDPOINT ───────────────────────────────
+// 1 point, Haiku only, returns scorecard + exec summary only
+// Fast (~30 seconds), no deep sections
+app.post('/quick-snapshot', async function(req, res) {
+
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1').split(',')[0].trim();
+  const rl = checkRateLimit(ip, 1);
+
+  if (!rl.allowed) {
+    return res.status(429).json({
+      error: 'rate_limit',
+      message: rl.message || 'Limit reached.',
+      dayUsed: rl.dayUsed, weekUsed: rl.weekUsed,
+      dayLimit: rl.dayLimit, weekLimit: rl.weekLimit
+    });
+  }
+
+  const { company } = req.body;
+  if (!company || !company.name) return res.status(400).json({ error: 'Missing company data' });
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'API key not configured' });
+
+  const SNAPSHOT_SYSTEM = `You are a financial research analyst. Do a quick analysis of the requested company using 1-2 targeted web searches. Return ONLY a valid JSON object, no markdown, no preamble.
+
+Return exactly this shape:
+{
+  "companyName": "Full official company name",
+  "ticker": "TICKER or N/A",
+  "sector": "Sector",
+  "exchange": "Exchange",
+  "executiveSummary": {
+    "business": "One key finding on core revenue model, market position, and cyclicality",
+    "competitivePosition": "One key finding on moat strength or fragility",
+    "financialHealth": "One key finding on earnings quality, margins, and returns",
+    "balanceSheet": "One key finding on leverage position and appropriateness",
+    "earningsQuality": "One key finding on reliability of reported earnings",
+    "management": "One key finding on capital allocation track record and integrity",
+    "valuation": "One key finding on where the stock sits relative to intrinsic value estimates",
+    "risks": "The single most material risk to the analysis"
+  },
+  "scorecard": {
+    "businessModel": { "rating": "Weak|Moderate|Strong", "summary": "One sentence on revenue model quality and unit economics" },
+    "marketOpportunity": { "rating": "Limited|Moderate|Large", "summary": "One sentence on market size and growth potential" },
+    "teamStrength": { "rating": "Weak|Moderate|Strong", "summary": "One sentence on management track record and execution quality" },
+    "competition": { "rating": "Weak|Moderate|Strong", "summary": "One sentence on competitive positioning, moat, and market share vs peers" },
+    "valuation": { "rating": "Cheap|Fair|Expensive", "summary": "One sentence on P/E, P/S vs peers and historical range" },
+    "fundingAndFinancials": { "rating": "Weak|Moderate|Strong", "summary": "One sentence on balance sheet health, FCF, and financial resilience" }
+  }
+}`;
+
+  const systemWithCache = [
+    { type: 'text', text: SNAPSHOT_SYSTEM, cache_control: { type: 'ephemeral' } }
+  ];
+
+  let messages = [{
+    role: 'user',
+    content: `Quick snapshot for: ${company.name} (Ticker: ${company.ticker}, Exchange: ${company.exchange}). Do 1-2 targeted searches and return the JSON snapshot.`
+  }];
+
+  let finalText = '';
+  let rounds = 0;
+
+  try {
+    while (rounds < 3) {
+      rounds++;
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'prompt-caching-2024-07-31'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 4000,
+          system: systemWithCache,
+          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+          messages
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || `API error ${response.status}`);
+
+      const content  = data.content || [];
+      const toolBlocks = content.filter(b => b.type === 'tool_use');
+      const textBlocks = content.filter(b => b.type === 'text');
+
+      if (!toolBlocks.length || data.stop_reason === 'end_turn') {
+        finalText = textBlocks.map(b => b.text).join('');
+        break;
+      }
+
+      messages.push({ role: 'assistant', content });
+      messages.push({
+        role: 'user',
+        content: toolBlocks.map(b => ({
+          type: 'tool_result',
+          tool_use_id: b.id,
+          content: `Search completed for: "${b.input?.query || ''}"`
+        }))
+      });
+    }
+
+    const repairedText = repairJSON(finalText);
+    return res.json({
+      text: repairedText,
+      rateLimit: { dayUsed: rl.dayUsed, weekUsed: rl.weekUsed, dayLimit: rl.dayLimit, weekLimit: rl.weekLimit }
+    });
+
+  } catch(err) {
+    console.error('Quick snapshot error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
