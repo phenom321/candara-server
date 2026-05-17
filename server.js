@@ -9,23 +9,59 @@ const fetch   = require('node-fetch');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({
-  origin: function(origin, callback) {
-    const allowed = [
-      'https://candara.ai',
-      'https://www.candara.ai',
-      'https://candara-ai.netlify.app',
-      'http://localhost:3000',
-      'http://127.0.0.1:5500'
-    ];
-    if (!origin || allowed.includes(origin)) callback(null, true);
-    else callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true
-}));
+const ALLOWED_ORIGINS = [
+  'https://candara.ai',
+  'https://www.candara.ai',
+  'https://candara-ai.netlify.app',
+  'http://localhost:3000',
+  'http://127.0.0.1:5500'
+];
+
+app.use(function(req, res, next) {
+  const origin = req.headers.origin;
+  if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
 const cookieParser = require('cookie-parser');
 app.use(express.json());
 app.use(cookieParser());
+
+// ── AUTH RATE LIMITER ─────────────────────────────────────
+// Max 5 attempts per IP per 15 minutes on signin/signup
+const authAttempts = {};
+const AUTH_WINDOW  = 15 * 60 * 1000;
+const AUTH_MAX     = 5;
+
+function authRateLimit(req, res, next) {
+  const ip  = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1').split(',')[0].trim();
+  const now = Date.now();
+  if (!authAttempts[ip]) authAttempts[ip] = [];
+  authAttempts[ip] = authAttempts[ip].filter(function(t) { return now - t < AUTH_WINDOW; });
+  if (authAttempts[ip].length >= AUTH_MAX) {
+    const waitMins = Math.ceil((authAttempts[ip][0] + AUTH_WINDOW - now) / 60000);
+    return res.status(429).json({ error: 'Too many attempts. Please wait ' + waitMins + ' minute(s) before trying again.' });
+  }
+  authAttempts[ip].push(now);
+  next();
+}
+
+// Clean up stale entries every 30 minutes
+setInterval(function() {
+  const now = Date.now();
+  Object.keys(authAttempts).forEach(function(ip) {
+    authAttempts[ip] = authAttempts[ip].filter(function(t) { return now - t < AUTH_WINDOW; });
+    if (!authAttempts[ip].length) delete authAttempts[ip];
+  });
+}, 30 * 60 * 1000);
+
 
 // ── SYSTEM PROMPT ─────────────────────────────────────────
 const SYSTEM_PROMPT = `You are a financial research analyst. Your role is to provide objective, in-depth company research and analysis ONLY. Do NOT provide investment recommendations, buy/sell/hold opinions, target prices, or portfolio advice of any kind.
@@ -979,7 +1015,7 @@ function getUserClient(accessToken) {
 }
 
 // Sign Up
-app.post('/auth/signup', async function(req, res) {
+app.post('/auth/signup', authRateLimit, async function(req, res) {
   try {
     const { email, password, fullName } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
@@ -997,8 +1033,8 @@ app.post('/auth/signup', async function(req, res) {
   }
 });
 
-// Sign In
-app.post('/auth/signin', async function(req, res) {
+// Sign In — returns tokens in response body (stored in localStorage by client)
+app.post('/auth/signin', authRateLimit, async function(req, res) {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
@@ -1006,30 +1042,33 @@ app.post('/auth/signin', async function(req, res) {
     const { data, error } = await sbAdmin.auth.signInWithPassword({ email, password });
     if (error) return res.status(401).json({ error: error.message });
 
-    res.cookie('sb_access_token',  data.session.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
-    res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
-
-    return res.json({ user: data.user });
+    return res.json({
+      user:          data.user,
+      access_token:  data.session.access_token,
+      refresh_token: data.session.refresh_token
+    });
   } catch(err) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Sign Out
+// Sign Out — client clears localStorage, we just confirm
 app.post('/auth/signout', async function(req, res) {
   try {
-    res.clearCookie('sb_access_token');
-    res.clearCookie('sb_refresh_token');
+    const token = req.headers.authorization && req.headers.authorization.replace('Bearer ', '');
+    if (token) {
+      try { await sbAdmin.auth.admin.signOut(token); } catch(e) {}
+    }
     return res.json({ success: true });
   } catch(err) {
-    return res.status(500).json({ error: err.message });
+    return res.json({ success: true });
   }
 });
 
-// Get session / current user
+// Get session / current user — token passed in Authorization header
 app.get('/auth/session', async function(req, res) {
   try {
-    const token = req.cookies && req.cookies.sb_access_token;
+    const token = req.headers.authorization && req.headers.authorization.replace('Bearer ', '');
     if (!token) return res.json({ user: null });
 
     const { data, error } = await sbAdmin.auth.getUser(token);
@@ -1043,16 +1082,17 @@ app.get('/auth/session', async function(req, res) {
 // Refresh token
 app.post('/auth/refresh', async function(req, res) {
   try {
-    const refreshToken = req.cookies && req.cookies.sb_refresh_token;
-    if (!refreshToken) return res.json({ user: null });
+    const { refresh_token } = req.body;
+    if (!refresh_token) return res.json({ user: null });
 
-    const { data, error } = await sbAdmin.auth.refreshSession({ refresh_token: refreshToken });
+    const { data, error } = await sbAdmin.auth.refreshSession({ refresh_token });
     if (error || !data.session) return res.json({ user: null });
 
-    res.cookie('sb_access_token',  data.session.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
-    res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
-
-    return res.json({ user: data.user });
+    return res.json({
+      user:          data.user,
+      access_token:  data.session.access_token,
+      refresh_token: data.session.refresh_token
+    });
   } catch(err) {
     return res.json({ user: null });
   }
@@ -1061,7 +1101,7 @@ app.post('/auth/refresh', async function(req, res) {
 // Supabase DB proxy — for saving reports and usage
 app.post('/db/:table', async function(req, res) {
   try {
-    const token = req.cookies && req.cookies.sb_access_token;
+    const token = req.headers.authorization && req.headers.authorization.replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Not authenticated' });
 
     const { method, body, filters } = req.body;
