@@ -999,19 +999,18 @@ const { createClient } = require('@supabase/supabase-js');
 
 const SUPABASE_URL      = 'https://zovnmpwubzyvhaxheji.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpvdm5tcHd1Ynp5eXZoYXhoZWppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg5ODEyMDIsImV4cCI6MjA5NDU1NzIwMn0.MEQSvxH45ubrgddkcnm5g6Cxf_gNc_dVf58HCzh3xx8';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
 
-// Admin client (service role — bypasses RLS, server-side only)
-const sbAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false }
-});
-
-// Helper to get user-scoped client from access token
-function getUserClient(accessToken) {
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: { headers: { Authorization: 'Bearer ' + accessToken } },
-    auth: { autoRefreshToken: false, persistSession: false }
-  });
+// Lazy initialization — only create client when first needed, not at startup
+// This avoids DNS resolution failures crashing the server on boot
+let _sbAdmin = null;
+function getSbAdmin() {
+  if (!_sbAdmin) {
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
+    _sbAdmin = createClient(SUPABASE_URL, key, {
+      auth: { autoRefreshToken: false, persistSession: false }
+    });
+  }
+  return _sbAdmin;
 }
 
 // Sign Up
@@ -1020,7 +1019,7 @@ app.post('/auth/signup', authRateLimit, async function(req, res) {
     const { email, password, fullName } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const { data, error } = await sbAdmin.auth.admin.createUser({
+    const { data, error } = await getSbAdmin().auth.admin.createUser({
       email,
       password,
       user_metadata: { full_name: fullName || '' },
@@ -1039,7 +1038,7 @@ app.post('/auth/signin', authRateLimit, async function(req, res) {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const { data, error } = await sbAdmin.auth.signInWithPassword({ email, password });
+    const { data, error } = await getSbAdmin().auth.signInWithPassword({ email, password });
     if (error) return res.status(401).json({ error: error.message });
 
     return res.json({
@@ -1057,7 +1056,7 @@ app.post('/auth/signout', async function(req, res) {
   try {
     const token = req.headers.authorization && req.headers.authorization.replace('Bearer ', '');
     if (token) {
-      try { await sbAdmin.auth.admin.signOut(token); } catch(e) {}
+      try { await getSbAdmin().auth.admin.signOut(token); } catch(e) {}
     }
     return res.json({ success: true });
   } catch(err) {
@@ -1071,7 +1070,7 @@ app.get('/auth/session', async function(req, res) {
     const token = req.headers.authorization && req.headers.authorization.replace('Bearer ', '');
     if (!token) return res.json({ user: null });
 
-    const { data, error } = await sbAdmin.auth.getUser(token);
+    const { data, error } = await getSbAdmin().auth.getUser(token);
     if (error || !data.user) return res.json({ user: null });
     return res.json({ user: data.user });
   } catch(err) {
@@ -1085,7 +1084,7 @@ app.post('/auth/refresh', async function(req, res) {
     const { refresh_token } = req.body;
     if (!refresh_token) return res.json({ user: null });
 
-    const { data, error } = await sbAdmin.auth.refreshSession({ refresh_token });
+    const { data, error } = await getSbAdmin().auth.refreshSession({ refresh_token });
     if (error || !data.session) return res.json({ user: null });
 
     return res.json({
@@ -1108,7 +1107,7 @@ app.post('/db/:table', async function(req, res) {
     const table = req.params.table;
 
     // Use admin client for DB operations
-    let query = sbAdmin.from(table);
+    let query = getSbAdmin().from(table);
 
     if (method === 'GET') {
       query = query.select(filters && filters.includes('select=') ?
@@ -1134,12 +1133,12 @@ app.post('/db/:table', async function(req, res) {
       return res.json(data);
 
     } else if (method === 'POST') {
-      const { data, error } = await sbAdmin.from(table).insert(body).select();
+      const { data, error } = await getSbAdmin().from(table).insert(body).select();
       if (error) return res.status(400).json({ error: error.message });
       return res.json(data);
 
     } else if (method === 'PATCH') {
-      let q = sbAdmin.from(table).update(body);
+      let q = getSbAdmin().from(table).update(body);
       if (filters) {
         const m = filters.match(/^id=eq\.(.+)$/);
         if (m) q = q.eq('id', m[1]);
@@ -1151,7 +1150,7 @@ app.post('/db/:table', async function(req, res) {
       return res.json(data);
 
     } else if (method === 'DELETE') {
-      let q = sbAdmin.from(table).delete();
+      let q = getSbAdmin().from(table).delete();
       if (filters) {
         const m = filters.match(/user_id=eq\.([^&]+)/);
         if (m) q = q.eq('user_id', m[1]);
