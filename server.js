@@ -959,22 +959,23 @@ Return exactly this shape:
 });
 
 // ── SUPABASE AUTH PROXY ──────────────────────────────────
-// Routes auth calls through Render to avoid Safari ITP blocking
+const { createClient } = require('@supabase/supabase-js');
+
 const SUPABASE_URL      = 'https://zovnmpwubzyvhaxheji.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpvdm5tcHd1Ynp5eXZoYXhoZWppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg5ODEyMDIsImV4cCI6MjA5NDU1NzIwMn0.MEQSvxH45ubrgddkcnm5g6Cxf_gNc_dVf58HCzh3xx8';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
 
-async function supabaseRequest(path, method, body, authHeader) {
-  const headers = {
-    'Content-Type':  'application/json',
-    'apikey':        process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY,
-    'Authorization': authHeader || ('Bearer ' + (process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY))
-  };
-  const res = await fetch(SUPABASE_URL + path, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
+// Admin client (service role — bypasses RLS, server-side only)
+const sbAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  auth: { autoRefreshToken: false, persistSession: false }
+});
+
+// Helper to get user-scoped client from access token
+function getUserClient(accessToken) {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: 'Bearer ' + accessToken } },
+    auth: { autoRefreshToken: false, persistSession: false }
   });
-  return res;
 }
 
 // Sign Up
@@ -983,13 +984,14 @@ app.post('/auth/signup', async function(req, res) {
     const { email, password, fullName } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const r = await supabaseRequest('/auth/v1/signup', 'POST', {
-      email, password,
-      data: { full_name: fullName || '' }
+    const { data, error } = await sbAdmin.auth.admin.createUser({
+      email,
+      password,
+      user_metadata: { full_name: fullName || '' },
+      email_confirm: false
     });
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: data.msg || data.error_description || 'Signup failed' });
-    return res.json({ user: data.user, session: data.session });
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ user: data.user, message: 'Account created! Check your email to confirm, then sign in.' });
   } catch(err) {
     return res.status(500).json({ error: err.message });
   }
@@ -1001,18 +1003,13 @@ app.post('/auth/signin', async function(req, res) {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const r = await supabaseRequest(
-      '/auth/v1/token?grant_type=password', 'POST',
-      { email, password }
-    );
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: data.error_description || data.msg || 'Sign in failed' });
+    const { data, error } = await sbAdmin.auth.signInWithPassword({ email, password });
+    if (error) return res.status(401).json({ error: error.message });
 
-    // Set session cookie
-    res.cookie('sb_access_token',  data.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
-    res.cookie('sb_refresh_token', data.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
+    res.cookie('sb_access_token',  data.session.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
+    res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
 
-    return res.json({ user: data.user, access_token: data.access_token });
+    return res.json({ user: data.user });
   } catch(err) {
     return res.status(500).json({ error: err.message });
   }
@@ -1021,10 +1018,6 @@ app.post('/auth/signin', async function(req, res) {
 // Sign Out
 app.post('/auth/signout', async function(req, res) {
   try {
-    const token = req.cookies && req.cookies.sb_access_token;
-    if (token) {
-      await supabaseRequest('/auth/v1/logout', 'POST', {}, 'Bearer ' + token);
-    }
     res.clearCookie('sb_access_token');
     res.clearCookie('sb_refresh_token');
     return res.json({ success: true });
@@ -1039,10 +1032,9 @@ app.get('/auth/session', async function(req, res) {
     const token = req.cookies && req.cookies.sb_access_token;
     if (!token) return res.json({ user: null });
 
-    const r = await supabaseRequest('/auth/v1/user', 'GET', null, 'Bearer ' + token);
-    const data = await r.json();
-    if (!r.ok) return res.json({ user: null });
-    return res.json({ user: data });
+    const { data, error } = await sbAdmin.auth.getUser(token);
+    if (error || !data.user) return res.json({ user: null });
+    return res.json({ user: data.user });
   } catch(err) {
     return res.json({ user: null });
   }
@@ -1054,17 +1046,13 @@ app.post('/auth/refresh', async function(req, res) {
     const refreshToken = req.cookies && req.cookies.sb_refresh_token;
     if (!refreshToken) return res.json({ user: null });
 
-    const r = await supabaseRequest(
-      '/auth/v1/token?grant_type=refresh_token', 'POST',
-      { refresh_token: refreshToken }
-    );
-    const data = await r.json();
-    if (!r.ok) return res.json({ user: null });
+    const { data, error } = await sbAdmin.auth.refreshSession({ refresh_token: refreshToken });
+    if (error || !data.session) return res.json({ user: null });
 
-    res.cookie('sb_access_token',  data.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
-    res.cookie('sb_refresh_token', data.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
+    res.cookie('sb_access_token',  data.session.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
+    res.cookie('sb_refresh_token', data.session.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
 
-    return res.json({ user: data.user, access_token: data.access_token });
+    return res.json({ user: data.user });
   } catch(err) {
     return res.json({ user: null });
   }
@@ -1077,21 +1065,65 @@ app.post('/db/:table', async function(req, res) {
     if (!token) return res.status(401).json({ error: 'Not authenticated' });
 
     const { method, body, filters } = req.body;
-    let url = SUPABASE_URL + '/rest/v1/' + req.params.table;
-    if (filters) url += '?' + filters;
+    const table = req.params.table;
 
-    const r = await fetch(url, {
-      method: method || 'GET',
-      headers: {
-        'Content-Type':  'application/json',
-        'apikey':        SUPABASE_ANON_KEY,
-        'Authorization': 'Bearer ' + token,
-        'Prefer':        method === 'POST' ? 'return=representation' : ''
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
-    const data = await r.json();
-    return res.status(r.status).json(data);
+    // Use admin client for DB operations
+    let query = sbAdmin.from(table);
+
+    if (method === 'GET') {
+      query = query.select(filters && filters.includes('select=') ?
+        filters.split('select=')[1].split('&')[0] : '*');
+      if (filters) {
+        // Parse simple filters
+        const parts = filters.split('&');
+        parts.forEach(function(p) {
+          const m = p.match(/^(\w+)=eq\.(.+)$/);
+          if (m) query = query.eq(m[1], m[2]);
+          const g = p.match(/^(\w+)=gte\.(.+)$/);
+          if (g) query = query.gte(g[1], g[2]);
+          if (p.startsWith('order=')) {
+            const [col, dir] = p.replace('order=','').split('.');
+            query = query.order(col, { ascending: dir !== 'desc' });
+          }
+          const lim = p.match(/^limit=(\d+)$/);
+          if (lim) query = query.limit(parseInt(lim[1]));
+        });
+      }
+      const { data, error } = await query;
+      if (error) return res.status(400).json({ error: error.message });
+      return res.json(data);
+
+    } else if (method === 'POST') {
+      const { data, error } = await sbAdmin.from(table).insert(body).select();
+      if (error) return res.status(400).json({ error: error.message });
+      return res.json(data);
+
+    } else if (method === 'PATCH') {
+      let q = sbAdmin.from(table).update(body);
+      if (filters) {
+        const m = filters.match(/^id=eq\.(.+)$/);
+        if (m) q = q.eq('id', m[1]);
+        const u = filters.match(/^user_id=eq\.(.+)$/);
+        if (u) q = q.eq('user_id', u[1]);
+      }
+      const { data, error } = await q.select();
+      if (error) return res.status(400).json({ error: error.message });
+      return res.json(data);
+
+    } else if (method === 'DELETE') {
+      let q = sbAdmin.from(table).delete();
+      if (filters) {
+        const m = filters.match(/user_id=eq\.([^&]+)/);
+        if (m) q = q.eq('user_id', m[1]);
+        const i = filters.match(/^id=eq\.(.+)$/);
+        if (i) q = q.eq('id', i[1]);
+      }
+      const { error } = await q;
+      if (error) return res.status(400).json({ error: error.message });
+      return res.json({ success: true });
+    }
+
+    return res.status(400).json({ error: 'Unknown method' });
   } catch(err) {
     return res.status(500).json({ error: err.message });
   }
