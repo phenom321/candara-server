@@ -167,8 +167,8 @@ You must also include a "scorecard" object at the top level of the JSON with exa
 // Quick search = 1 point, Deep research = 2 points
 // Limit: 2 points/day, 8 points/week
 const rateLimitStore = {};
-const DAILY_LIMIT  = 2;
-const WEEKLY_LIMIT = 8;
+const DAILY_LIMIT  = 1;
+const WEEKLY_LIMIT = 3;
 
 function getTodayKey() {
   return new Date().toISOString().slice(0, 10);
