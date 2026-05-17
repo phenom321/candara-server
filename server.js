@@ -6,6 +6,16 @@ const express = require('express');
 const cors    = require('cors');
 const fetch   = require('node-fetch');
 
+// ── DNS FIX FOR SUPABASE (IPv6 PREFERENCE) ───────────────
+// Supabase serves over IPv6 by default. Force Node to try IPv6 first to avoid
+// getaddrinfo ENOTFOUND errors on Render and similar IPv6-capable platforms.
+const dns = require('dns');
+if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv6first');
+
+// Also force fetch to use IPv6 via a custom agent
+const https = require('https');
+const ipv6Agent = new https.Agent({ family: 6 });
+
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
@@ -1012,7 +1022,8 @@ async function sbRequest(path, method, body, token) {
   const res = await fetch(SUPABASE_URL + path, {
     method:  method || 'GET',
     headers: headers,
-    body:    body ? JSON.stringify(body) : undefined
+    body:    body ? JSON.stringify(body) : undefined,
+    agent:   ipv6Agent
   });
   const text = await res.text();
   try { return { ok: res.ok, status: res.status, data: JSON.parse(text) }; }
@@ -1123,7 +1134,8 @@ app.post('/db/:table', async function(req, res) {
     const r = await fetch(url, {
       method:  dbMethod,
       headers: headers,
-      body:    body ? JSON.stringify(body) : undefined
+      body:    body ? JSON.stringify(body) : undefined,
+      agent:   ipv6Agent
     });
 
     const text = await r.text();
