@@ -9,8 +9,23 @@ const fetch   = require('node-fetch');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+app.use(cors({
+  origin: function(origin, callback) {
+    const allowed = [
+      'https://candara.ai',
+      'https://www.candara.ai',
+      'https://candara-ai.netlify.app',
+      'http://localhost:3000',
+      'http://127.0.0.1:5500'
+    ];
+    if (!origin || allowed.includes(origin)) callback(null, true);
+    else callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+}));
+const cookieParser = require('cookie-parser');
 app.use(express.json());
+app.use(cookieParser());
 
 // ── SYSTEM PROMPT ─────────────────────────────────────────
 const SYSTEM_PROMPT = `You are a financial research analyst. Your role is to provide objective, in-depth company research and analysis ONLY. Do NOT provide investment recommendations, buy/sell/hold opinions, target prices, or portfolio advice of any kind.
@@ -939,6 +954,145 @@ Return exactly this shape:
 
   } catch(err) {
     console.error('Quick snapshot error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── SUPABASE AUTH PROXY ──────────────────────────────────
+// Routes auth calls through Render to avoid Safari ITP blocking
+const SUPABASE_URL      = 'https://zovnmpwubzyvhaxheji.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpvdm5tcHd1Ynp5eXZoYXhoZWppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg5ODEyMDIsImV4cCI6MjA5NDU1NzIwMn0.MEQSvxH45ubrgddkcnm5g6Cxf_gNc_dVf58HCzh3xx8';
+
+async function supabaseRequest(path, method, body, authHeader) {
+  const headers = {
+    'Content-Type':  'application/json',
+    'apikey':        process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY,
+    'Authorization': authHeader || ('Bearer ' + (process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY))
+  };
+  const res = await fetch(SUPABASE_URL + path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return res;
+}
+
+// Sign Up
+app.post('/auth/signup', async function(req, res) {
+  try {
+    const { email, password, fullName } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
+    const r = await supabaseRequest('/auth/v1/signup', 'POST', {
+      email, password,
+      data: { full_name: fullName || '' }
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: data.msg || data.error_description || 'Signup failed' });
+    return res.json({ user: data.user, session: data.session });
+  } catch(err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Sign In
+app.post('/auth/signin', async function(req, res) {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
+    const r = await supabaseRequest(
+      '/auth/v1/token?grant_type=password', 'POST',
+      { email, password }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: data.error_description || data.msg || 'Sign in failed' });
+
+    // Set session cookie
+    res.cookie('sb_access_token',  data.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
+    res.cookie('sb_refresh_token', data.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
+
+    return res.json({ user: data.user, access_token: data.access_token });
+  } catch(err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Sign Out
+app.post('/auth/signout', async function(req, res) {
+  try {
+    const token = req.cookies && req.cookies.sb_access_token;
+    if (token) {
+      await supabaseRequest('/auth/v1/logout', 'POST', {}, 'Bearer ' + token);
+    }
+    res.clearCookie('sb_access_token');
+    res.clearCookie('sb_refresh_token');
+    return res.json({ success: true });
+  } catch(err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Get session / current user
+app.get('/auth/session', async function(req, res) {
+  try {
+    const token = req.cookies && req.cookies.sb_access_token;
+    if (!token) return res.json({ user: null });
+
+    const r = await supabaseRequest('/auth/v1/user', 'GET', null, 'Bearer ' + token);
+    const data = await r.json();
+    if (!r.ok) return res.json({ user: null });
+    return res.json({ user: data });
+  } catch(err) {
+    return res.json({ user: null });
+  }
+});
+
+// Refresh token
+app.post('/auth/refresh', async function(req, res) {
+  try {
+    const refreshToken = req.cookies && req.cookies.sb_refresh_token;
+    if (!refreshToken) return res.json({ user: null });
+
+    const r = await supabaseRequest(
+      '/auth/v1/token?grant_type=refresh_token', 'POST',
+      { refresh_token: refreshToken }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.json({ user: null });
+
+    res.cookie('sb_access_token',  data.access_token,  { httpOnly: true, secure: true, sameSite: 'None', maxAge: 3600000 });
+    res.cookie('sb_refresh_token', data.refresh_token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 7 * 24 * 3600000 });
+
+    return res.json({ user: data.user, access_token: data.access_token });
+  } catch(err) {
+    return res.json({ user: null });
+  }
+});
+
+// Supabase DB proxy — for saving reports and usage
+app.post('/db/:table', async function(req, res) {
+  try {
+    const token = req.cookies && req.cookies.sb_access_token;
+    if (!token) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { method, body, filters } = req.body;
+    let url = SUPABASE_URL + '/rest/v1/' + req.params.table;
+    if (filters) url += '?' + filters;
+
+    const r = await fetch(url, {
+      method: method || 'GET',
+      headers: {
+        'Content-Type':  'application/json',
+        'apikey':        SUPABASE_ANON_KEY,
+        'Authorization': 'Bearer ' + token,
+        'Prefer':        method === 'POST' ? 'return=representation' : ''
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const data = await r.json();
+    return res.status(r.status).json(data);
+  } catch(err) {
     return res.status(500).json({ error: err.message });
   }
 });
